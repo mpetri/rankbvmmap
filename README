@@ -1,0 +1,16 @@
+
+uncompressed rank/select enabeld bitvector that can be memory mapped directly into memory.
+
+file format:
+
+START
+<size_t containing the number of bytes in the rankbv data structure>
+<rankbv data structure>
+EOF
+
+usage:
+
+see tests/rankbvTest.cpp
+
+attributions:
+- code taken from libcds
