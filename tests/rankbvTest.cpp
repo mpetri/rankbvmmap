@@ -15,7 +15,7 @@
 TEST(rankbv , saveload)
 {
     uint32_t A[14] = {1,2,4,8,16,32,64,128,256,512,1024,2048,4096,0};
-    rankbv_t* rbv = rankbv_create(A,13*32,2);
+    rankbv_t* rbv = rankbv_create((uint64_t*)A,13*32,2);
 
     FILE* f = fopen("rankbv.test1","w");
     rankbv_save(rbv,f);
@@ -54,7 +54,7 @@ TEST(rankbv , saveload)
 TEST(rankbv , mmap)
 {
     uint32_t A[14] = {1,2,4,8,16,32,64,128,256,512,1024,2048,4096,0};
-    rankbv_t* rbv = rankbv_create(A,13*32,2);
+    rankbv_t* rbv = rankbv_create((uint64_t*)A,13*32,2);
 
     FILE* f = fopen("rankbv.test1","w");
     rankbv_save(rbv,f);
@@ -109,6 +109,7 @@ TEST(rankbv , select0)
     rankbv_setbit(rbv,50);
     rankbv_setbit(rbv,63);
     rankbv_setbit(rbv,499);
+
 
     rankbv_build(rbv);
 
@@ -173,7 +174,7 @@ TEST(rankbv , access)
     rankbv_free(rbv);
 
     uint32_t A[14] = {1,2,4,8,16,32,64,128,256,512,1024,2048,4096,0};
-    rbv = rankbv_create(A,13*32,2);
+    rbv = rankbv_create((uint64_t*)A,13*32,2);
 
     CHECK(rankbv_access(rbv,0)==1);
     CHECK(rankbv_access(rbv,33)==1);
@@ -188,7 +189,7 @@ TEST(rankbv , access)
 TEST(rankbv , rank)
 {
     uint32_t A[14] = {1,2,4,8,16,32,64,128,256,512,1024,2048,4096,0};
-    rankbv_t* rbv = rankbv_create(A,13*32,2);
+    rankbv_t* rbv = rankbv_create((uint64_t*)A,13*32,2);
 
     CHECK(rankbv_rank1(rbv,5)==1);
     CHECK(rankbv_rank1(rbv,40)==2);

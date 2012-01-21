@@ -1,6 +1,8 @@
 
 #include "rankbv.h"
 
+#include "string.h"
+
 rankbv_t*
 rankbv_create(size_t n,uint32_t f)
 {
@@ -10,8 +12,8 @@ rankbv_create(size_t n,uint32_t f)
     size_t ints = n/RBVW+1;
 
     rankbv_t* rbv = (rankbv_t*) rankbv_safecalloc(sizeof(rankbv_t)
-                    + (num_sblocks*sizeof(uint64_t))
-                    + (ints*sizeof(uint32_t)));
+                    + (num_sblocks*sizeof(uint64_t)) /*S[]*/
+                    + (ints*sizeof(uint64_t)));      /*A[]*/
 
     rbv->n = n;
     rbv->factor = f;
@@ -21,13 +23,15 @@ rankbv_create(size_t n,uint32_t f)
 }
 
 rankbv_t*
-rankbv_create(uint32_t* A,size_t n,uint32_t f)
+rankbv_create(uint64_t* A,size_t n,uint32_t f)
 {
-    size_t i;
     rankbv_t* rbv = rankbv_create(n,f);
     size_t ints = n/RBVW+1;
-    uint32_t* B = rankbv_getdata(rbv);
-    for (i=0; i<ints; i++) B[i] = A[i];
+    for (size_t i=0; i<ints; i++) {
+        size_t block = i/rbv->factor;
+        rbv->S[(block+1)+(block*rbv->factor)+(i%rbv->factor)] = A[i];
+        /*rbv->S[i+(i/rbv->factor)+1] = A[i];*/
+    }
     rankbv_build(rbv);
     return rbv;
 }
@@ -46,13 +50,13 @@ rankbv_build(rankbv_t* rbv)
     size_t i,j,start,stop;
     uint64_t tmp;
     size_t num_sblocks = rankbv_numsblocks(rbv);
-    uint32_t* B = rankbv_getdata(rbv);
+    rbv->S[0] = 0;
     for (i=1; i<num_sblocks; i++) {
-        rbv->S[i] = rbv->S[i-1];
+        rbv->S[i*rbv->factor+i] = rbv->S[(i-1)*rbv->factor+(i-1)];
         tmp = 0;
-        start = (i-1)*rbv->factor; stop = start+rbv->factor;
-        for (j=start; j<stop; j++) tmp += rankbv_popcount(B[i]);
-        rbv->S[i] += tmp;
+        start = (i-1)*rbv->factor+i; stop = start+rbv->factor;
+        for (j=start; j<stop; j++) tmp += __builtin_popcountll(rbv->S[j]);
+        rbv->S[i*rbv->factor+i] += tmp;
     }
     rbv->ones = rankbv_rank1(rbv,rbv->n-1);
 }
@@ -60,8 +64,7 @@ rankbv_build(rankbv_t* rbv)
 int
 rankbv_access(rankbv_t* rbv,size_t i)
 {
-    uint32_t* B = rankbv_getdata(rbv);
-    return rankbv_bitget(B,i);
+    return rankbv_getbit(rbv,i);
 }
 
 size_t
@@ -69,12 +72,14 @@ rankbv_rank1(rankbv_t* rbv,size_t i)
 {
     size_t j;
     i++;
-    uint64_t resp = rbv->S[i/rbv->s];
-    size_t start = (i/rbv->s)*rbv->factor;
-    size_t stop = i/RBVW;
-    uint32_t* B = rankbv_getdata(rbv);
-    for (j=start; j<stop; j++) resp+=rankbv_popcount(B[j]);
-    resp += rankbv_popcount(B[i/RBVW]&((1<<(i & rankbv_mask31))-1));
+    uint64_t bs = i/rbv->s;
+    uint64_t SBlock = bs*rbv->factor+bs;
+    uint64_t resp = rbv->S[SBlock];
+    size_t start = SBlock+1;
+    size_t stop = start+(i%rbv->s)/RBVW;
+    uint64_t* S = (uint64_t*) rbv->S;
+    for (j=start; j<stop; j++) resp+=__builtin_popcountll(S[j]);
+    resp += __builtin_popcountll(S[stop]&((1LL<<(i &rankbv_mask63))-1));
     return resp;
 }
 
@@ -88,10 +93,8 @@ rankbv_ones(rankbv_t* rbv)
 void
 rankbv_print(rankbv_t* rbv)
 {
-    size_t i;
-    uint32_t* B = rankbv_getdata(rbv);
-    for (i = 0; i < rbv->n; ++i) {
-        if (rankbv_bitget(B,i)) printf("1");
+    for (size_t i = 0; i < rbv->n; ++i) {
+        if (rankbv_getbit(rbv,i)) printf("1");
         else printf("0");
     }
     printf("\n");
@@ -104,48 +107,55 @@ rankbv_select0(rankbv_t* rbv,size_t x)
 
     /* binary search over first level rank structure */
     if (x==0) return 0;
-    size_t l=0, r=rankbv_numsblocks(rbv)-1;
+
+    size_t nsb = rankbv_numsblocks(rbv);
+    size_t l=0, r=nsb-1;
     size_t mid=(l+r)/2;
-    size_t rankmid = (mid * rbv->factor * RBVW) - rbv->S[mid];
+    size_t sblock = mid*rbv->factor+mid;
+    size_t rankmid = (mid*rbv->s) - rbv->S[sblock];
+    /* binary search over first level rank structure */
     while (l<=r) {
         if (rankmid<x)
             l = mid+1;
         else
             r = mid-1;
         mid = (l+r)/2;
-        rankmid = (mid * rbv->factor * RBVW) - rbv->S[mid];
+        sblock = mid*rbv->factor+mid;
+        rankmid = (mid*rbv->s) - rbv->S[sblock];
     }
+
     /* sequential search using popcount over a int */
-    size_t left;
-    left= mid * rbv->factor;
     x-=rankmid;
-    uint32_t* B = rankbv_getdata(rbv);
-    size_t j= B[left];
-    size_t zeros = RBVW - rankbv_popcount(j);
-    size_t ints = rbv->n/RBVW+1;
+    sblock++;
+    size_t zeros = RBVW - __builtin_popcountll(rbv->S[sblock]);
+    size_t ints = nsb + rbv->n/RBVW+1;
+    size_t skip = 0;
     while (zeros < x) {
-        x-=zeros; left++;
-        if (left > ints) return rbv->n;
-        j = B[left];
-        zeros = RBVW-rankbv_popcount(j);
+        x-=zeros; sblock++;
+        if (sblock > ints) return rbv->n;
+        zeros = RBVW- __builtin_popcountll(rbv->S[sblock]);
+        skip++;
     }
+
     //sequential search using popcount over a char
-    left=left*RBVW;
-    rankmid = 8-rankbv_popcount8(j);
+    /* binsearch over integer */
+    uint64_t j = rbv->S[sblock];
+    sblock=  mid*rbv->s + (skip*RBVW);
+    rankmid = 32 - __builtin_popcount(j&0xFFFFFFFF);
     if (rankmid < x) {
-        j=j>>8;
+        j=j>>32;
         x-=rankmid;
-        left+=8;
-        rankmid = 8-rankbv_popcount8(j);
+        sblock+=32;
+        rankmid = 16 - __builtin_popcount(j&0x0000FFFF);
         if (rankmid < x) {
-            j=j>>8;
+            j=j>>16;
             x-=rankmid;
-            left+=8;
-            rankmid = 8-rankbv_popcount8(j);
+            sblock+=16;
+            rankmid = 8 - __builtin_popcount(j&0x000000FF);
             if (rankmid < x) {
                 j=j>>8;
                 x-=rankmid;
-                left+=8;
+                sblock+=8;
             }
         }
     }
@@ -154,11 +164,11 @@ rankbv_select0(rankbv_t* rbv,size_t x)
     while (x>0) {
         if (j%2 == 0) x--;
         j=j>>1;
-        left++;
+        sblock++;
     }
-    left--;
-    if (left > rbv->n)  return rbv->n;
-    else return left;
+    sblock--;
+    if (sblock > rbv->n)  return rbv->n;
+    else return sblock;
 }
 
 
@@ -167,9 +177,12 @@ rankbv_select1(rankbv_t* rbv,size_t x)
 {
     if (x == 0) return (size_t)(-1);
     if (x > rbv->ones)  return (size_t)(-1);
-    size_t l=0, r=rankbv_numsblocks(rbv)-1;
+
+    size_t nsb = rankbv_numsblocks(rbv);
+    size_t l=0, r=nsb-1;
     size_t mid=(l+r)/2;
-    size_t rankmid = rbv->S[mid];
+    size_t sblock = mid*rbv->factor+mid;
+    size_t rankmid = rbv->S[sblock];
     /* binary search over first level rank structure */
     while (l<=r) {
         if (rankmid<x)
@@ -177,38 +190,39 @@ rankbv_select1(rankbv_t* rbv,size_t x)
         else
             r = mid-1;
         mid = (l+r)/2;
-        rankmid = rbv->S[mid];
+        sblock = mid*rbv->factor+mid;
+        rankmid = rbv->S[sblock];
     }
     /* binary search over blocks */
-    uint32_t* B = rankbv_getdata(rbv);
-    size_t left;
-    left=mid*rbv->factor;
     x-=rankmid;
-    size_t ones = rankbv_popcount(B[left]);
-    size_t ints = rbv->n/RBVW+1;
+    sblock++;
+    size_t ones = __builtin_popcountll(rbv->S[sblock]);
+    size_t ints = nsb + rbv->n/RBVW+1;
+    size_t skip = 0;
     while (ones < x) {
-        x-=ones; left++;
-        if (left > ints) return rbv->n;
-        ones = rankbv_popcount(B[left]);
+        x-=ones; sblock++;
+        if (sblock > ints) return rbv->n;
+        ones = __builtin_popcountll(rbv->S[sblock]);
+        skip++;
     }
     /* binsearch over integer */
-    size_t j = B[left];
-    left=left*RBVW;
-    rankmid = rankbv_popcount8(j);
+    uint64_t j = rbv->S[sblock];
+    sblock=  mid*rbv->s + (skip*RBVW);
+    rankmid = __builtin_popcount(j&0xFFFFFFFF);
     if (rankmid < x) {
-        j=j>>8;
+        j=j>>32;
         x-=rankmid;
-        left+=8;
-        rankmid = rankbv_popcount8(j);
+        sblock+=32;
+        rankmid = __builtin_popcount(j&0x0000FFFF);
         if (rankmid < x) {
-            j=j>>8;
+            j=j>>16;
             x-=rankmid;
-            left+=8;
-            rankmid = rankbv_popcount8(j);
+            sblock+=16;
+            rankmid = __builtin_popcount(j&0x000000FF);
             if (rankmid < x) {
                 j=j>>8;
                 x-=rankmid;
-                left+=8;
+                sblock+=8;
             }
         }
     }
@@ -216,9 +230,9 @@ rankbv_select1(rankbv_t* rbv,size_t x)
     while (x>0) {
         if (j&1) x--;
         j=j>>1;
-        left++;
+        sblock++;
     }
-    return left-1;
+    return sblock-1;
 }
 
 size_t
@@ -228,7 +242,7 @@ rankbv_spaceusage(rankbv_t* rbv)
     size_t num_sblocks = rankbv_numsblocks(rbv);
     bytes = sizeof(rankbv_t);
     bytes += sizeof(uint64_t)*(num_sblocks); /* S[] */
-    bytes += sizeof(uint32_t)*(rbv->n/RBVW+1); /* A[] */
+    bytes += sizeof(uint64_t)*(rbv->n/RBVW+1); /* A[] */
     return bytes;
 }
 
@@ -252,13 +266,13 @@ rankbv_save(rankbv_t* rbv,FILE* f)
     size_t ints = rbv->n/RBVW+1;
     size_t num_sblocks = rankbv_numsblocks(rbv);
 
-    size_t bytes = sizeof(rankbv_t) + (sizeof(uint64_t)*num_sblocks) + (sizeof(uint32_t)*ints);
+    size_t bytes = sizeof(rankbv_t) + (sizeof(uint64_t)*num_sblocks) + (sizeof(uint64_t)*ints);
 
     fwrite(&bytes,sizeof(uint64_t),1,f);
     fwrite(rbv,sizeof(rankbv_t),1,f);
     fwrite(rbv->S,sizeof(uint64_t),num_sblocks,f);
-    uint32_t* B = rankbv_getdata(rbv);
-    fwrite(B,sizeof(uint32_t),ints,f);
+    uint64_t* B = rankbv_getdata(rbv);
+    fwrite(B,sizeof(uint64_t),ints,f);
 
     return bytes+sizeof(size_t);
 }
@@ -273,4 +287,3 @@ rankbv_safecalloc(size_t n)
     }
     return mem;
 }
-
